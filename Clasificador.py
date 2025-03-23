@@ -8,12 +8,14 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from skimage.feature import graycomatrix, graycoprops
 from skimage import img_as_ubyte
 from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
 
 class Worker(QThread):
-    finished = pyqtSignal()  #proceso terminado
+    finished = pyqtSignal()  # Proceso terminado
     result_ready = pyqtSignal(np.ndarray, list)  # Enviar imagen y csv
 
     def __init__(self, image_path):
@@ -21,11 +23,11 @@ class Worker(QThread):
         self.image_path = image_path
 
     def run(self):
-        #Procesamiento
+        # Procesamiento
         image = cv2.imread(self.image_path)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        #Umbralizacion
+        # Umbralización
         binary = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
 
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -40,12 +42,12 @@ class Worker(QThread):
             area = cv2.contourArea(contour)
             perimeter = cv2.arcLength(contour, True)
 
-            #Color
+            # Color
             mask = np.zeros(gray.shape, np.uint8)
             cv2.drawContours(mask, [contour], -1, 255, -1)
             mean_color = cv2.mean(image, mask=mask)
 
-            #Textura
+            # Textura
             contrast, energy = self.calculate_texture(gray)
 
             if 0.9 <= aspect_ratio <= 1.1:
@@ -60,29 +62,25 @@ class Worker(QThread):
 
             cv2.drawContours(image, [contour], -1, color, 2)
             results.append({
-                'x': x,
-                'y': y,
-                'shape': shape,
-                'color': mean_color[:3], 
-                'contrast': contrast,
-                'energy': energy,
-                'area': area,
-                'perimeter': perimeter
+                'coordenada_x': x,  
+                'coordenada_y': y, 
+                'forma': shape,  
+                'color': mean_color[:3],  
+                'contraste': contrast,  
+                'energia': energy,  
+                'area': area, 
+                'perimetro': perimeter  
             })
 
-            #Se pasan los datos al Clasificador de Bayes
+            # Se pasan los datos al Clasificador de Bayes y AdaBoost
             features.append([mean_color[0], mean_color[1], mean_color[2], contrast, energy, area, perimeter])
             labels.append(shape)
 
-        #Guarda el csv
+        # Guarda el csv con las columnas 
         df = pd.DataFrame(results)
         df.to_csv('microalgae_classification.csv', index=False)
 
-        #Evaluacion y entrenamiento
-        if len(features) > 0 and len(labels) > 0:
-            self.train_and_evaluate_bayes(features, labels)
-
-        #resultados
+        # Resultados
         self.result_ready.emit(image, results)
         self.finished.emit()
 
@@ -93,26 +91,70 @@ class Worker(QThread):
         energy = graycoprops(glcm, 'energy')[0, 0]
         return contrast, energy
 
-    def train_and_evaluate_bayes(self, features, labels):
-        #Datod de entrenamiento y prueba
-        X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
 
-        #Entrenamiento
-        model = GaussianNB()
-        model.fit(X_train, y_train)
+class BayesClassifier(QThread):
+    finished = pyqtSignal(str)  # Señal para enviar los resultados de Naive Bayes
 
-        #Calcular precision
-        y_pred = model.predict(X_test)
-        accuracy = accuracy_score(y_test, y_pred)
+    def __init__(self, features, labels):
+        super().__init__()
+        self.features = features
+        self.labels = labels
 
-        
-        print("------------------ CLASIFICADOR NAIVE BAYES ------------------")
-        print("Proceso de clasificación:")
-        print(f"- Total de muestras: {len(features)}")
-        print(f"- Muestras de entrenamiento: {len(X_train)}")
-        print(f"- Muestras de prueba: {len(X_test)}")
-        print(f"- Precisión (accuracy): {accuracy * 100:.2f}%")
-        print("-------------------------------------------------------------")
+    def run(self):
+        if len(self.features) > 0 and len(self.labels) > 0:
+            # Datos de entrenamiento y prueba
+            X_train, X_test, y_train, y_test = train_test_split(self.features, self.labels, test_size=0.5, random_state=42)
+
+            # Entrenamiento y evaluación de Naive Bayes
+            bayes_model = GaussianNB()
+            bayes_model.fit(X_train, y_train)
+            y_pred_bayes = bayes_model.predict(X_test)
+            accuracy_bayes = accuracy_score(y_test, y_pred_bayes)
+
+            # Resultados
+            result = (
+                "------------------ CLASIFICADOR NAIVE BAYES ------------------\n"
+                f"Proceso de clasificación:\n"
+                f"- Total de muestras: {len(self.features)}\n"
+                f"- Muestras de entrenamiento: {len(X_train)}\n"
+                f"- Muestras de prueba: {len(X_test)}\n"
+                f"- Precisión (accuracy): {accuracy_bayes * 100:.2f}%\n"
+                "-------------------------------------------------------------\n"
+            )
+            self.finished.emit(result)
+
+
+class AdaBoostClassifierThread(QThread):
+    finished = pyqtSignal(str)  # Señal para enviar los resultados de AdaBoost
+
+    def __init__(self, features, labels):
+        super().__init__()
+        self.features = features
+        self.labels = labels
+
+    def run(self):
+        if len(self.features) > 0 and len(self.labels) > 0:
+            # Datos de entrenamiento y prueba
+            X_train, X_test, y_train, y_test = train_test_split(self.features, self.labels, test_size=0.5, random_state=42)
+
+            # Entrenamiento y evaluación de AdaBoost
+            base_estimator = DecisionTreeClassifier(max_depth=1)
+            adaboost_model = AdaBoostClassifier(estimator=base_estimator, n_estimators=50, random_state=42)  # Corregido: 'estimator' en lugar de 'base_estimator'
+            adaboost_model.fit(X_train, y_train)
+            y_pred_adaboost = adaboost_model.predict(X_test)
+            accuracy_adaboost = accuracy_score(y_test, y_pred_adaboost)
+
+            # Resultados
+            result = (
+                "------------------ CLASIFICADOR ADABOOST ------------------\n"
+                f"Proceso de clasificación:\n"
+                f"- Total de muestras: {len(self.features)}\n"
+                f"- Muestras de entrenamiento: {len(X_train)}\n"
+                f"- Muestras de prueba: {len(X_test)}\n"
+                f"- Precisión (accuracy): {accuracy_adaboost * 100:.2f}%\n"
+                "-------------------------------------------------------------\n"
+            )
+            self.finished.emit(result)
 
 
 class MicroalgaeClassifier(QMainWindow):
@@ -146,6 +188,8 @@ class MicroalgaeClassifier(QMainWindow):
 
         self.image_path = None
         self.worker = None
+        self.bayes_thread = None
+        self.adaboost_thread = None
 
     def load_image(self):
         self.image_path, _ = QFileDialog.getOpenFileName(self, "Cargar Imagen", "", "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)")
@@ -158,17 +202,17 @@ class MicroalgaeClassifier(QMainWindow):
         if not self.image_path:
             return
 
-    
+        # Deshabilitar el botón de clasificar mientras se procesa
         self.btn_classify.setEnabled(False)
 
-    
+        # Crear y configurar el hilo 
         self.worker = Worker(self.image_path)
         self.worker.result_ready.connect(self.update_results)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
 
     def update_results(self, image, results):
-        #Guardar la imagen con las microalgas ya clasificadas
+        # Guardar la imagen con las microalgas ya clasificadas
         output_image_path = 'classified_microalgae.png'
         cv2.imwrite(output_image_path, image)
 
@@ -178,6 +222,23 @@ class MicroalgaeClassifier(QMainWindow):
         self.label.setPixmap(QPixmap.fromImage(q_img).scaled(self.label.size(), Qt.AspectRatioMode.KeepAspectRatio))
 
         self.label.setText(f"Clasificación completada. Imagen guardada como {output_image_path}")
+
+        # Extraer características y etiquetas para los clasificadores
+        features = [[r['color'][0], r['color'][1], r['color'][2], r['contraste'], r['energia'], r['area'], r['perimetro']] for r in results]
+        labels = [r['forma'] for r in results]
+
+        # Iniciar hilos para los clasificadores
+        self.bayes_thread = BayesClassifier(features, labels)
+        self.bayes_thread.finished.connect(self.print_results)
+        self.bayes_thread.start()
+
+        self.adaboost_thread = AdaBoostClassifierThread(features, labels)
+        self.adaboost_thread.finished.connect(self.print_results)
+        self.adaboost_thread.start()
+
+    def print_results(self, result):
+        # Imprimir resultados en la terminal
+        print(result)
 
     def on_finished(self):
         self.btn_classify.setEnabled(True)
